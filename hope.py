@@ -60,7 +60,6 @@ DEEPGRAM_MODEL = "nova-3"
 # ============================================================
 
 DEEPGRAM_LANGUAGE = "en"
-DEEPGRAM_LANGUAGE="roman"
 DEEPGRAM_TIMEOUT = 60
 
 
