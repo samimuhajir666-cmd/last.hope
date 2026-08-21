@@ -30,6 +30,7 @@ if not DEEPGRAM_API_KEY:
     st.stop()
 
 try:
+    # Explicit keyword argument signature matching Deepgram v3 specifications
     deepgram_client = DeepgramClient(api_key=DEEPGRAM_API_KEY)
 except Exception as init_error:
     st.error(f"❌ Failed to boot up Deepgram Core Client: {init_error}")
@@ -41,6 +42,7 @@ SYSTEM_PROMPT = (
 )
 
 def force_roman_script(text):
+    """Converts native Urdu/Arabic scripts or accented characters into clean Romanized English text."""
     if not text:
         return text
     if bool(re.search(r'[^\x00-\x7F]', text)):
@@ -54,6 +56,10 @@ SPEECH_LOW_HZ = 85.0
 SPEECH_HIGH_HZ = 3500.0
 
 def apply_hardware_acoustic_filters(raw_bytes, sensitivity=0.5):
+    """
+    Suppresses high-volume shouting clipping spikes and suppresses 
+    ambient room noise components by 85%.
+    """
     import scipy.io.wavfile as wav
     
     sample_rate, data = wav.read(io.BytesIO(raw_bytes))
@@ -70,6 +76,7 @@ def apply_hardware_acoustic_filters(raw_bytes, sensitivity=0.5):
         
     max_peak = np.max(np.abs(audio_float))
     if max_peak > 0.75:
+        # Apply soft-knee compression scaling matrix to normalize loud shouting volumes
         audio_float = np.tanh(audio_float / max_peak) * 0.75
         
     nyquist = 0.5 * sample_rate
@@ -95,6 +102,7 @@ def apply_hardware_acoustic_filters(raw_bytes, sensitivity=0.5):
 # 🎙️ MULTI-LANGUAGE DEEPGRAM TRANSCRIBE INTEGRATION (STT CORE)
 # ==============================================================================
 def execute_agent_transcription(processed_wav_bytes):
+    """Queries Deepgram Nova-3 Multi-Language models with conversational tuning rules."""
     try:
         options = PrerecordedOptions(
             model="nova-3",
@@ -107,8 +115,11 @@ def execute_agent_transcription(processed_wav_bytes):
         payload = {"buffer": processed_wav_bytes}
         response = deepgram_client.listen.prerecorded.v("1").transcribe_file(payload, options)
         
-        raw_text = response.results.channels.alternatives.transcript
-        confidence = response.results.channels.alternatives.confidence
+        # FIXED: Navigating strict Deepgram v3 response structure layouts perfectly
+        channel = response.results.channels[0]
+        alternative = channel.alternatives[0]
+        raw_text = alternative.transcript
+        confidence = alternative.confidence
         
         final_roman_text = force_roman_script(raw_text)
         return final_roman_text, confidence
