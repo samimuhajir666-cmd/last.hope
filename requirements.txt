@@ -1,0 +1,7 @@
+streamlit
+deepgram-sdk
+numpy
+scipy
+noisereduce
+unidecode
+python-dotenv
