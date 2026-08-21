@@ -1,7 +1,19 @@
-streamlit
-requests
-numpy
-scipy
-groq
-python-dotenv
-streamlit-mic-recorder
+# --- Web UI & Framework ---
+streamlit>=1.30.0
+streamlit-mic-recorder>=0.0.8
+
+# --- API Clients & Orchestration ---
+groq>=0.4.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# --- Audio Signal Processing & DSP ---
+numpy>=1.24.0
+scipy>=1.10.0
+librosa>=0.10.0
+pydub>=0.25.1
+
+# --- Voice Activity Detection & ML Engine ---
+torch>=2.0.0
+torchaudio>=2.0.0
+onnxruntime>=1.15.0
