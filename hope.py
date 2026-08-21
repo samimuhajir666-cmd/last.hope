@@ -10,12 +10,12 @@ from pathlib import Path
 from dotenv import load_dotenv
 from streamlit_mic_recorder import mic_recorder
 from unidecode import unidecode
-from deepgram import DeepgramClient, PrerecordedOptions
+from deepgram import DeepgramClient, PrerecordedOptions, FileSource
 
 load_dotenv()
 
 # ==============================================================================
-# 🔑 AGENT SECURITY PROTOCOL & SYSTEM KEYS MATRIX
+# 🔑 API KEY
 # ==============================================================================
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 if not DEEPGRAM_API_KEY:
@@ -26,23 +26,19 @@ if not DEEPGRAM_API_KEY:
         pass
 
 if not DEEPGRAM_API_KEY:
-    st.error("❌ DEEPGRAM_API_KEY missing! Please check your Streamlit Advanced Secrets panel.")
+    st.error("❌ DEEPGRAM_API_KEY missing! Please check your .env or Streamlit Secrets.")
     st.stop()
 
 try:
-    # Explicit keyword argument signature matching Deepgram v3 specifications
     deepgram_client = DeepgramClient(api_key=DEEPGRAM_API_KEY)
 except Exception as init_error:
-    st.error(f"❌ Failed to boot up Deepgram Core Client: {init_error}")
+    st.error(f"❌ Failed to initialize Deepgram: {init_error}")
     st.stop()
 
-SYSTEM_PROMPT = (
-    "Roman Urdu, Arabic, and English mixed linguistic pipeline. Normalizing non-ascii "
-    "characters to plain text vectors while filtering environmental background sound tags."
-)
+SYSTEM_PROMPT = "Roman Urdu, Arabic, and English mixed linguistic pipeline."
 
 def force_roman_script(text):
-    """Converts native Urdu/Arabic scripts or accented characters into clean Romanized English text."""
+    """Convert Urdu/Arabic script to Romanized English."""
     if not text:
         return text
     if bool(re.search(r'[^\x00-\x7F]', text)):
@@ -50,16 +46,13 @@ def force_roman_script(text):
     return text
 
 # ==============================================================================
-# 🎚️ ADVANCED ACOUSTIC HARDWARE CLEANUP & LIMITER (ANTI-SHOUTING)
+# 🎚️ AUDIO PROCESSING
 # ==============================================================================
 SPEECH_LOW_HZ = 85.0
 SPEECH_HIGH_HZ = 3500.0
 
-def apply_hardware_acoustic_filters(raw_bytes, sensitivity=0.5):
-    """
-    Suppresses high-volume shouting clipping spikes and suppresses 
-    ambient room noise components by 85%.
-    """
+def apply_hardware_acoustic_filters(raw_bytes, sensitivity=0.7):
+    """Apply noise reduction and anti-shouting compression."""
     import scipy.io.wavfile as wav
     
     sample_rate, data = wav.read(io.BytesIO(raw_bytes))
@@ -74,17 +67,19 @@ def apply_hardware_acoustic_filters(raw_bytes, sensitivity=0.5):
     if len(audio_float.shape) > 1:
         audio_float = np.mean(audio_float, axis=1)
         
+    # Anti-shouting limiter
     max_peak = np.max(np.abs(audio_float))
     if max_peak > 0.75:
-        # Apply soft-knee compression scaling matrix to normalize loud shouting volumes
         audio_float = np.tanh(audio_float / max_peak) * 0.75
         
+    # Bandpass filter
     nyquist = 0.5 * sample_rate
     low_cut = SPEECH_LOW_HZ / nyquist
     high_cut = min(SPEECH_HIGH_HZ / nyquist, 0.99)
     b, a = signal.butter(4, [low_cut, high_cut], btype="band")
     filtered_signal = signal.filtfilt(b, a, audio_float)
     
+    # Noise reduction
     reduced_noise = nr.reduce_noise(
         y=filtered_signal, 
         sr=sample_rate, 
@@ -99,11 +94,17 @@ def apply_hardware_acoustic_filters(raw_bytes, sensitivity=0.5):
     return output_io.getvalue()
 
 # ==============================================================================
-# 🎙️ MULTI-LANGUAGE DEEPGRAM TRANSCRIBE INTEGRATION (STT CORE)
+# 🎙️ DEEPGRAM TRANSCRIBE (FIXED — v3.7.0 compatible)
 # ==============================================================================
 def execute_agent_transcription(processed_wav_bytes):
-    """Queries Deepgram Nova-3 Multi-Language models with conversational tuning rules."""
+    """Transcribe using Deepgram Nova-3 with multi-language support."""
     try:
+        # 🔥 FIX: Proper FileSource for v3.7.0
+        payload = {
+            "buffer": processed_wav_bytes,
+            "mimetype": "audio/wav",
+        }
+        
         options = PrerecordedOptions(
             model="nova-3",
             smart_format=True,
@@ -112,71 +113,83 @@ def execute_agent_transcription(processed_wav_bytes):
             language="multi",
         )
         
-        payload = {"buffer": processed_wav_bytes}
-        response = deepgram_client.listen.prerecorded.v("1").transcribe_file(payload, options)
+        response = deepgram_client.listen.prerecorded.v("1").transcribe_file(
+            FileSource(**payload), options
+        )
         
-        # FIXED: Navigating strict Deepgram v3 response structure layouts perfectly
-        channel = response.results.channels[0]
-        alternative = channel.alternatives[0]
-        raw_text = alternative.transcript
-        confidence = alternative.confidence
-        
-        final_roman_text = force_roman_script(raw_text)
-        return final_roman_text, confidence
+        # 🔥 FIX: Safe response parsing for v3.7.0
+        if response and hasattr(response, 'results'):
+            channel = response.results.channels[0]
+            alternative = channel.alternatives[0]
+            raw_text = alternative.transcript
+            confidence = alternative.confidence
+            
+            final_roman_text = force_roman_script(raw_text)
+            return final_roman_text, confidence
+        else:
+            return "", 0.0
+            
     except Exception as api_error:
-        st.error(f"Deepgram core API transaction failure: {api_error}")
+        st.error(f"Deepgram API error: {api_error}")
         return "", 0.0
 
 # ==============================================================================
-# 🖥️ STREAMLIT FRONTEND WEB APPLICATION DASHBOARD
+# 🖥️ STREAMLIT UI
 # ==============================================================================
 st.set_page_config(page_title="Multi-Language STT Agent", page_icon="🤖", layout="wide")
 st.title("🤖 Multi-Language AI Speech-To-Text Agent")
-st.caption("Production Build: Audio Preprocessing Engine (Anti-Shouting Limiter + 85% Noise Filter)")
+st.caption("Production Build: Anti-Shouting Limiter + 85% Noise Filter")
 
-st.sidebar.header("⚙️ Agent Environmental Controls")
-noise_reduction_sensitivity = st.sidebar.slider("Background Cancellation Power", 0.1, 1.0, 0.7, step=0.05)
+st.sidebar.header("⚙️ Agent Controls")
+noise_reduction_sensitivity = st.sidebar.slider("Noise Reduction Power", 0.1, 1.0, 0.7, step=0.05)
 st.sidebar.markdown("---")
-st.sidebar.markdown("**Operational Directive:**\n`" + SYSTEM_PROMPT + "`")
+st.sidebar.markdown(f"**Directive:** `{SYSTEM_PROMPT}`")
 
-uploaded_file = st.file_uploader("Upload an Audio File (WAV, MP3, M4A)", type=["wav", "mp3", "m4a"])
-st.write("✨ **-- OR SPEAK LIVE TO THE AGENT --** ✨")
-recorded_audio = mic_recorder(start_prompt="🔴 Wake Agent (Record Live)", stop_prompt="⏹️ Submit Audio", key="live_agent_mic")
+uploaded_file = st.file_uploader("Upload Audio File (WAV, MP3, M4A)", type=["wav", "mp3", "m4a"])
+st.write("✨ **-- OR SPEAK LIVE --** ✨")
+recorded_audio = mic_recorder(
+    start_prompt="🔴 Start Recording",
+    stop_prompt="⏹️ Stop Recording",
+    key="live_agent_mic"
+)
 
 audio_payload_bytes = None
 
 if uploaded_file is not None:
     audio_payload_bytes = uploaded_file.read()
-elif recorded_audio is not None:
+elif recorded_audio is not None and 'bytes' in recorded_audio:
     audio_payload_bytes = recorded_audio['bytes']
 
 if audio_payload_bytes is not None:
-    st.info("📁 Audio matrix received. Initiating hardware processing filters...")
+    st.info("📁 Audio received. Processing...")
     
     try:
-        cleaned_bytes = apply_hardware_acoustic_filters(audio_payload_bytes, sensitivity=noise_reduction_sensitivity)
+        cleaned_bytes = apply_hardware_acoustic_filters(
+            audio_payload_bytes, 
+            sensitivity=noise_reduction_sensitivity
+        )
         
-        with st.spinner("🧠 Agent is transcribing and converting linguistic matrices..."):
+        with st.spinner("🧠 Transcribing..."):
             transcript, confidence_score = execute_agent_transcription(cleaned_bytes)
             
-        st.success("🎉 Processing complete!")
-        
-        meta_col1, meta_col2 = st.columns(2)
-        meta_col1.metric("🌐 Language Framework Mode", "MULTI (Mixed English/Roman Urdu)")
-        meta_col2.metric("📊 Agent Decoding Confidence", f"{confidence_score * 100:.2f}%")
-        
-        st.markdown("### 📝 Cleaned Output Transcript (Forced Roman Script):")
         if transcript:
+            st.success("✅ Complete!")
+            
+            col1, col2 = st.columns(2)
+            col1.metric("🌐 Language Mode", "Multi (Urdu/English)")
+            col2.metric("📊 Confidence", f"{confidence_score * 100:.2f}%")
+            
+            st.markdown("### 📝 Output:")
             st.code(transcript, language="text")
             
             st.download_button(
-                label="📥 Download Clean Text File",
+                label="📥 Download Text",
                 data=transcript,
-                file_name=f"agent_output_{int(time.time())}.txt",
+                file_name=f"transcript_{int(time.time())}.txt",
                 mime="text/plain"
             )
         else:
-            st.warning("⚠️ The agent could not decipher any valid words. Check input device thresholds.")
+            st.warning("⚠️ No speech detected. Try speaking clearly.")
             
-    except Exception as pipeline_error:
-        st.error(f"Fatal System Pipeline Crash: {pipeline_error}")
+    except Exception as e:
+        st.error(f"❌ Error: {e}")
