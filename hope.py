@@ -10,12 +10,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from streamlit_mic_recorder import mic_recorder
 from unidecode import unidecode
-
-try:
-    from deepgram import DeepgramClient, PrerecordedOptions
-    DEEPGRAM_AVAILABLE = True
-except ImportError:
-    DEEPGRAM_AVAILABLE = False
+from deepgram import DeepgramClient, PrerecordedOptions
 
 load_dotenv()
 
@@ -32,10 +27,6 @@ if not DEEPGRAM_API_KEY:
 
 if not DEEPGRAM_API_KEY:
     st.error("❌ DEEPGRAM_API_KEY missing! Please check your Streamlit Advanced Secrets panel.")
-    st.stop()
-
-if not DEEPGRAM_AVAILABLE:
-    st.error("❌ Deepgram Python SDK is missing from requirements.txt.")
     st.stop()
 
 try:
@@ -116,8 +107,8 @@ def execute_agent_transcription(processed_wav_bytes):
         payload = {"buffer": processed_wav_bytes}
         response = deepgram_client.listen.prerecorded.v("1").transcribe_file(payload, options)
         
-        raw_text = response.results.channels[0].alternatives[0].transcript
-        confidence = response.results.channels[0].alternatives[0].confidence
+        raw_text = response.results.channels.alternatives.transcript
+        confidence = response.results.channels.alternatives.confidence
         
         final_roman_text = force_roman_script(raw_text)
         return final_roman_text, confidence
