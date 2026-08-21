@@ -1,195 +1,307 @@
+import html
 import io
 import os
 import re
-import time
 import numpy as np
+import requests
+import scipy.io.wavfile as wav
 import scipy.signal as signal
-import noisereduce as nr
 import streamlit as st
-from pathlib import Path
 from dotenv import load_dotenv
+from groq import Groq
 from streamlit_mic_recorder import mic_recorder
-from unidecode import unidecode
-from deepgram import DeepgramClient, PrerecordedOptions, FileSource
 
+# ============================
+# 🖥️ STREAMLIT PAGE CONFIG
+# ============================
+st.set_page_config(
+    page_title="Speech to Text (Roman Urdu)",
+    page_icon="🎤",
+    layout="centered",
+)
 load_dotenv()
 
-# ==============================================================================
-# 🔑 API KEY
-# ==============================================================================
-DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
-if not DEEPGRAM_API_KEY:
-    try:
-        if "DEEPGRAM_API_KEY" in st.secrets:
-            DEEPGRAM_API_KEY = st.secrets["DEEPGRAM_API_KEY"]
-    except Exception:
-        pass
+# ============================
+# 🔑 API KEYS CONFIGURATION
+# ============================
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY") or st.secrets.get("DEEPGRAM_API_KEY", None)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", None)
 
 if not DEEPGRAM_API_KEY:
-    st.error("❌ DEEPGRAM_API_KEY missing! Please check your .env or Streamlit Secrets.")
+    st.error("❌ DEEPGRAM_API_KEY nahi mili. .env file ya Streamlit Secrets check karein.")
     st.stop()
 
-try:
-    deepgram_client = DeepgramClient(api_key=DEEPGRAM_API_KEY)
-except Exception as init_error:
-    st.error(f"❌ Failed to initialize Deepgram: {init_error}")
-    st.stop()
+# ============================
+# 🎙️ DEEPGRAM & GROQ CONFIG
+# ============================
+DEEPGRAM_API_URL = "https://api.deepgram.com/v1/listen"
+DEEPGRAM_MODEL = "nova-3"
+DEEPGRAM_LANGUAGE = "ur"  # Deepgram listens in native Urdu script
+DEEPGRAM_TIMEOUT = 60
 
-SYSTEM_PROMPT = "Roman Urdu, Arabic, and English mixed linguistic pipeline."
-
-def force_roman_script(text):
-    """Convert Urdu/Arabic script to Romanized English."""
+# ============================
+# 🧹 CLEAN & TRANSLITERATE
+# ============================
+def clean_text(text):
     if not text:
+        return ""
+    text = re.sub(r"[’'‘`\^\~]", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def convert_to_roman_script(text):
+    """Converts Urdu Perso-Arabic script into natural Roman Urdu + English."""
+    if not text or not text.strip():
+        return ""
+
+    if not GROQ_API_KEY:
+        st.warning("⚠️ GROQ_API_KEY missing. Transliteration skipped.")
         return text
-    if bool(re.search(r'[^\x00-\x7F]', text)):
-        return unidecode(text)
-    return text
 
-# ==============================================================================
-# 🎚️ AUDIO PROCESSING
-# ==============================================================================
-SPEECH_LOW_HZ = 85.0
-SPEECH_HIGH_HZ = 3500.0
-
-def apply_hardware_acoustic_filters(raw_bytes, sensitivity=0.7):
-    """Apply noise reduction and anti-shouting compression."""
-    import scipy.io.wavfile as wav
-    
-    sample_rate, data = wav.read(io.BytesIO(raw_bytes))
-    
-    if data.dtype == np.int16:
-        audio_float = data.astype(np.float32) / 32768.0
-    elif data.dtype == np.int32:
-        audio_float = data.astype(np.float32) / 2147483648.0
-    else:
-        audio_float = data.astype(np.float32)
-        
-    if len(audio_float.shape) > 1:
-        audio_float = np.mean(audio_float, axis=1)
-        
-    # Anti-shouting limiter
-    max_peak = np.max(np.abs(audio_float))
-    if max_peak > 0.75:
-        audio_float = np.tanh(audio_float / max_peak) * 0.75
-        
-    # Bandpass filter
-    nyquist = 0.5 * sample_rate
-    low_cut = SPEECH_LOW_HZ / nyquist
-    high_cut = min(SPEECH_HIGH_HZ / nyquist, 0.99)
-    b, a = signal.butter(4, [low_cut, high_cut], btype="band")
-    filtered_signal = signal.filtfilt(b, a, audio_float)
-    
-    # Noise reduction
-    reduced_noise = nr.reduce_noise(
-        y=filtered_signal, 
-        sr=sample_rate, 
-        prop_decrease=0.85, 
-        n_fft=1024
-    )
-    
-    clean_pcm = np.clip(reduced_noise * 32768.0, -32768, 32767).astype(np.int16)
-    
-    output_io = io.BytesIO()
-    wav.write(output_io, sample_rate, clean_pcm)
-    return output_io.getvalue()
-
-# ==============================================================================
-# 🎙️ DEEPGRAM TRANSCRIBE (FIXED — v3.7.0 compatible)
-# ==============================================================================
-def execute_agent_transcription(processed_wav_bytes):
-    """Transcribe using Deepgram Nova-3 with multi-language support."""
     try:
-        # 🔥 FIX: Proper FileSource for v3.7.0
-        payload = {
-            "buffer": processed_wav_bytes,
-            "mimetype": "audio/wav",
+        client = Groq(api_key=GROQ_API_KEY)
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert audio transcript converter. "
+                        "Convert the input Urdu text into clean, simple, accurate ROMAN URDU (Latin script). "
+                        "Keep technical or English words (e.g., 'API', 'Python', 'project', 'code') in English text. "
+                        "STRICT RULE: Output ONLY the converted Roman text. Absolutely NO Urdu script or Hindi script. "
+                        "Do not add introductions, quotes, or notes."
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
+            temperature=0.1,
+            max_tokens=1000,
+        )
+        converted = response.choices[0].message.content.strip()
+        # Clean remaining Urdu characters if any
+        converted = re.sub(r"[\u0600-\u06FF\u0900-\u097F]", "", converted)
+        return converted.strip()
+    except Exception as e:
+        return text
+
+
+# ============================
+# 🎙️ DEEPGRAM TRANSCRIBE ENGINE
+# ============================
+def transcribe_with_deepgram(processed_bytes, debug=False):
+    params = [
+        ("model", DEEPGRAM_MODEL),
+        ("language", DEEPGRAM_LANGUAGE),
+        ("smart_format", "true"),
+        ("punctuate", "true"),
+        ("utterances", "true"),
+        ("numerals", "true"),
+    ]
+
+    headers = {
+        "Authorization": f"Token {DEEPGRAM_API_KEY}",
+        "Content-Type": "audio/wav",
+    }
+
+    try:
+        response = requests.post(
+            DEEPGRAM_API_URL,
+            params=params,
+            headers=headers,
+            data=processed_bytes,
+            timeout=DEEPGRAM_TIMEOUT,
+        )
+    except requests.RequestException as e:
+        if debug:
+            st.exception(e)
+        raise RuntimeError(f"Deepgram connection failed: {e}") from e
+
+    if response.status_code != 200:
+        detail = response.text[:1200]
+        raise RuntimeError(f"Deepgram API error ({response.status_code}): {detail}")
+
+    try:
+        data = response.json()
+    except Exception as e:
+        raise RuntimeError("Invalid JSON response from Deepgram.") from e
+
+    results = data.get("results", {})
+    channels = results.get("channels", [])
+
+    if not channels:
+        return {"text": "", "confidence": 0.0}
+
+    alternatives = channels[0].get("alternatives", [])
+    if not alternatives:
+        return {"text": "", "confidence": 0.0}
+
+    alternative = alternatives[0]
+    transcript = (alternative.get("transcript") or "").strip()
+    confidence = float(alternative.get("confidence", 0.0) or 0.0)
+
+    if not transcript:
+        utterances = results.get("utterances") or []
+        transcript = " ".join(
+            (u.get("transcript") or "").strip() for u in utterances if u.get("transcript")
+        ).strip()
+
+    if not transcript:
+        return {"text": "", "confidence": 0.0}
+
+    # Transliterate Urdu text to Roman script using Groq
+    roman_text = convert_to_roman_script(transcript)
+
+    return {
+        "text": clean_text(roman_text),
+        "confidence": confidence,
+    }
+
+
+# ============================
+# 🎚️ RELIABLE AUDIO PRE-PROCESSING
+# ============================
+def process_audio_buffer(audio_bytes, enhance_audio=False):
+    try:
+        audio_file = io.BytesIO(audio_bytes)
+        sample_rate, audio_data = wav.read(audio_file)
+
+        if sample_rate <= 0 or len(audio_data) == 0:
+            return None
+
+        # Convert to Mono if Stereo
+        if len(audio_data.shape) > 1:
+            audio_data = np.mean(audio_data, axis=1)
+
+        audio_data = audio_data.astype(np.float64)
+        duration = len(audio_data) / float(sample_rate)
+
+        # Basic duration guard (ignore under 0.1s)
+        if duration < 0.10:
+            return None
+
+        # Light Optional Normalization
+        if enhance_audio:
+            max_val = np.max(np.abs(audio_data))
+            if max_val > 0:
+                audio_data = (audio_data / max_val) * 32767.0
+
+        processed_audio = np.clip(audio_data, -32768, 32767).astype(np.int16)
+
+        output_buffer = io.BytesIO()
+        wav.write(output_buffer, sample_rate, processed_audio)
+        output_buffer.seek(0)
+
+        return {
+            "processed_bytes": output_buffer.read(),
+            "sample_rate": int(sample_rate),
+            "duration": float(duration),
         }
-        
-        options = PrerecordedOptions(
-            model="nova-3",
-            smart_format=True,
-            punctuate=True,
-            utterances=True,
-            language="multi",
-        )
-        
-        response = deepgram_client.listen.prerecorded.v("1").transcribe_file(
-            FileSource(**payload), options
-        )
-        
-        # 🔥 FIX: Safe response parsing for v3.7.0
-        if response and hasattr(response, 'results'):
-            channel = response.results.channels[0]
-            alternative = channel.alternatives[0]
-            raw_text = alternative.transcript
-            confidence = alternative.confidence
-            
-            final_roman_text = force_roman_script(raw_text)
-            return final_roman_text, confidence
-        else:
-            return "", 0.0
-            
-    except Exception as api_error:
-        st.error(f"Deepgram API error: {api_error}")
-        return "", 0.0
 
-# ==============================================================================
-# 🖥️ STREAMLIT UI
-# ==============================================================================
-st.set_page_config(page_title="Multi-Language STT Agent", page_icon="🤖", layout="wide")
-st.title("🤖 Multi-Language AI Speech-To-Text Agent")
-st.caption("Production Build: Anti-Shouting Limiter + 85% Noise Filter")
+    except Exception as e:
+        return None
 
-st.sidebar.header("⚙️ Agent Controls")
-noise_reduction_sensitivity = st.sidebar.slider("Noise Reduction Power", 0.1, 1.0, 0.7, step=0.05)
-st.sidebar.markdown("---")
-st.sidebar.markdown(f"**Directive:** `{SYSTEM_PROMPT}`")
 
-uploaded_file = st.file_uploader("Upload Audio File (WAV, MP3, M4A)", type=["wav", "mp3", "m4a"])
-st.write("✨ **-- OR SPEAK LIVE --** ✨")
-recorded_audio = mic_recorder(
-    start_prompt="🔴 Start Recording",
-    stop_prompt="⏹️ Stop Recording",
-    key="live_agent_mic"
+# ============================
+# 🧠 SESSION STATE
+# ============================
+if "last_transcription" not in st.session_state:
+    st.session_state.last_transcription = ""
+if "last_confidence" not in st.session_state:
+    st.session_state.last_confidence = None
+
+# ============================
+# 🖥️ UI INTERFACE
+# ============================
+st.title("🎤 SPEECH TO TEXT (Roman Urdu)")
+st.caption("Deepgram Nova-3 + Groq Llama-3.3 Engine")
+
+enhance_audio = st.checkbox("✨ Light audio normalization", value=False)
+debug_mode = st.checkbox("🐞 Show technical debug errors", value=False)
+
+st.subheader("🎤 Voice Input")
+st.write("Press Start, speak your lesson or audio, then press Stop.")
+
+audio_output = mic_recorder(
+    start_prompt="🎤 Click to Start Recording",
+    stop_prompt="🛑 Stop Recording",
+    just_once=True,
+    use_container_width=True,
+    format="wav",
+    key="listener_mic",
 )
 
-audio_payload_bytes = None
+# ============================
+# 🧠 TRANSCRIPTION EXECUTION
+# ============================
+if audio_output and "bytes" in audio_output:
+    audio_bytes = audio_output["bytes"]
 
-if uploaded_file is not None:
-    audio_payload_bytes = uploaded_file.read()
-elif recorded_audio is not None and 'bytes' in recorded_audio:
-    audio_payload_bytes = recorded_audio['bytes']
+    if len(audio_bytes) > 0:
+        with st.spinner("⏳ Processing audio buffer..."):
+            result = process_audio_buffer(audio_bytes, enhance_audio=enhance_audio)
 
-if audio_payload_bytes is not None:
-    st.info("📁 Audio received. Processing...")
-    
-    try:
-        cleaned_bytes = apply_hardware_acoustic_filters(
-            audio_payload_bytes, 
-            sensitivity=noise_reduction_sensitivity
-        )
-        
-        with st.spinner("🧠 Transcribing..."):
-            transcript, confidence_score = execute_agent_transcription(cleaned_bytes)
-            
-        if transcript:
-            st.success("✅ Complete!")
-            
-            col1, col2 = st.columns(2)
-            col1.metric("🌐 Language Mode", "Multi (Urdu/English)")
-            col2.metric("📊 Confidence", f"{confidence_score * 100:.2f}%")
-            
-            st.markdown("### 📝 Output:")
-            st.code(transcript, language="text")
-            
-            st.download_button(
-                label="📥 Download Text",
-                data=transcript,
-                file_name=f"transcript_{int(time.time())}.txt",
-                mime="text/plain"
-            )
+        if result is None:
+            st.warning("⚠️ Audio format invalid or recording too short.")
         else:
-            st.warning("⚠️ No speech detected. Try speaking clearly.")
-            
-    except Exception as e:
-        st.error(f"❌ Error: {e}")
+            processed_bytes = result["processed_bytes"]
+
+            with st.spinner("⚡ Transcribing & Transliterating..."):
+                try:
+                    transcription_result = transcribe_with_deepgram(
+                        processed_bytes, debug=debug_mode
+                    )
+                    text_from_voice = transcription_result["text"]
+                    confidence = transcription_result["confidence"]
+
+                    if text_from_voice:
+                        st.session_state.last_transcription = text_from_voice
+                        st.session_state.last_confidence = confidence
+                        st.success("✅ Complete!")
+                    else:
+                        st.warning("⚠️ No clear speech detected. Speak clearly into the mic.")
+
+                except Exception as e:
+                    st.error(f"❌ Transcription error: {e}")
+                    if debug_mode:
+                        st.exception(e)
+
+# ============================
+# 📝 DISPLAY OUTPUT
+# ============================
+st.divider()
+st.subheader("📝 Transcribed Text (Roman Script)")
+
+if st.session_state.last_transcription:
+    safe_text = html.escape(st.session_state.last_transcription)
+    st.markdown(
+        f"""
+        <div style="padding: 18px; border-radius: 10px; background-color: #1e1e2e; border: 1px solid #45475a; margin-top: 10px;">
+            <div style="font-weight: bold; color: #89b4fa; margin-bottom: 8px; font-size: 1.1em;">Result:</div>
+            <div style="font-size: 1.25em; color: #cdd6f4; font-weight: 500; line-height: 1.5;">{safe_text}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if st.session_state.last_confidence is not None:
+        st.caption(f"Deepgram confidence score: {st.session_state.last_confidence:.2f}")
+else:
+    st.info("Your transcription will appear here.")
+
+# ============================
+# 🛠️ SESSION CONTROLS
+# ============================
+st.divider()
+col1, col2 = st.columns(2)
+with col1:
+    if st.button("🛑 Lock Text", use_container_width=True):
+        if st.session_state.last_transcription:
+            st.success("Saved in session.")
+        else:
+            st.warning("No text available.")
+with col2:
+    if st.button("🗑️ Clear Text", use_container_width=True):
+        st.session_state.last_transcription = ""
+        st.session_state.last_confidence = None
+        st.rerun()
