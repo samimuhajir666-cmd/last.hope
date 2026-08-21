@@ -5,3 +5,4 @@ scipy
 noisereduce
 unidecode
 python-dotenv
+streamlit-mic-recorder
