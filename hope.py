@@ -59,8 +59,8 @@ DEEPGRAM_MODEL = "nova-3"
 # "multi" usually better choice hai.
 # ============================================================
 
-DEEPGRAM_LANGUAGE = "multi"
-
+DEEPGRAM_LANGUAGE = "en"
+DEEPGRAM_LANGUAGE="roman"
 DEEPGRAM_TIMEOUT = 60
 
 
