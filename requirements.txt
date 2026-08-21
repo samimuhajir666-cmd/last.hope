@@ -1,8 +1,7 @@
 streamlit
-deepgram-sdk
+streamlit-mic-recorder
+groq
+python-dotenv
+requests
 numpy
 scipy
-noisereduce
-unidecode
-python-dotenv
-streamlit-mic-recorder
